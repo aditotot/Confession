@@ -1,4 +1,3 @@
-# This is cogs/confess.py
 import discord
 import re 
 import random 
@@ -50,15 +49,19 @@ async def _log_confession(bot, interaction, content, attachment_url, new_index, 
     except Exception as e:
         print(f"Error sending log: {e}")
 
-# --- Helper: Send Confession (UPDATED to Save Type) ---
+# --- Helper: Send Confession (UPDATED with Button Fix) ---
 async def _send_confession(bot, interaction, content, attachment_url=None, reply_to_index=None, target_channel=None, embed_title=None, original_content=None, reply_to_message=None):
-    """A reusable function to send the confession embed, saves message ID to DB."""
+    """A reusable function to send the confession embed, handles button disabling."""
     
     index = await db.get_next_confession_index(bot.db, interaction.guild.id)
     base_title = embed_title if embed_title else "Anonymous Confession"
     final_title = f"{base_title} (#{index})"
-    is_reply = reply_to_index is not None # Define if this is a reply to an existing post
+    
+    # Determine if this is a reply *before* setting the view
+    is_reply = reply_to_index is not None or (target_channel and isinstance(target_channel, discord.Thread)) or reply_to_message
+    
     view = ReplyOnlyView(bot) if is_reply else ConfessionView(bot)
+    is_original_confession = not is_reply # This is an original confession if it's not a reply
     
     embed = discord.Embed(
         title=final_title,
@@ -70,7 +73,7 @@ async def _send_confession(bot, interaction, content, attachment_url=None, reply
     
     sent_message = None
     sent_to_channel = None
-    is_original_confession = not is_reply
+    main_confess_channel = None
     
     if reply_to_message:
         sent_message = await reply_to_message.reply(embed=embed, view=view)
@@ -79,6 +82,7 @@ async def _send_confession(bot, interaction, content, attachment_url=None, reply
         sent_message = await target_channel.send(embed=embed, view=view)
         sent_to_channel = sent_message.channel
     else:
+        # This is an original confession, send to main channel
         config = await db.get_confession_channel(bot.db, interaction.guild.id)
         if not config or "channel_id" not in config:
             return None 
@@ -88,6 +92,24 @@ async def _send_confession(bot, interaction, content, attachment_url=None, reply
             sent_to_channel = main_confess_channel
         else:
             return None 
+    
+    # --- NEW BUTTON PERSISTENCE FIX ---
+    # If we just sent an original confession to the main channel, disable old buttons
+    if sent_message and is_original_confession and main_confess_channel and sent_to_channel.id == main_confess_channel.id:
+        async for old_message in main_confess_channel.history(limit=10):
+            # Skip the message we just sent
+            if old_message.id == sent_message.id:
+                continue
+            
+            # Find the first message before this one that is from the bot, has embeds, and has the 2-button view
+            if old_message.author.id == bot.user.id and old_message.embeds and old_message.components:
+                if len(old_message.components) > 0 and len(old_message.components[0].children) > 1:
+                    try:
+                        await old_message.edit(view=None) # Remove buttons
+                        print(f"Disabled buttons on previous confession: {old_message.id}")
+                    except discord.HTTPException as e:
+                        print(f"Error disabling old buttons: {e}")
+                    break # Stop searching once we've found and edited it
     
     # --- SAVE MAPPING TO DB ---
     if sent_message:
@@ -108,10 +130,12 @@ async def get_or_create_reply_thread(message: discord.Message, name: str) -> dis
         return new_thread
     except discord.HTTPException as e:
         if e.code == 160004: # Thread already created
+            # Check active threads
             for thread in message.channel.threads:
                 if thread.parent_message_id == message.id:
                     return thread
             
+            # Check archived threads
             try:
                 async for thread in message.channel.archived_threads(limit=None): 
                     if thread.parent_message_id == message.id:
@@ -181,9 +205,8 @@ class ReplyModal(ui.Modal):
         try:
             target_input = self.confession_to_reply_to.value.strip()
             in_thread = isinstance(interaction.channel, discord.Thread)
-            is_input_provided = bool(target_input)
 
-            if is_input_provided:
+            if target_input:
                 # Case 3: ID is entered. Find the message by DATABASE INDEX or Message ID.
                 is_index_lookup = False
                 message_id = None
@@ -249,7 +272,7 @@ class ReplyModal(ui.Modal):
 
                     # --- FINAL LOGIC: DETERMINE TYPE ---
                     confession_map = await db.get_confession_map(self.bot.db, interaction.guild.id, original_index)
-                    message_type = confession_map['type'] if confession_map else 'original'
+                    message_type = confession_map['type'] if (confession_map and 'type' in confession_map) else 'original'
                     
                     # Target is a REPLY -> USE DISCORD REPLY
                     if message_type == 'reply':
