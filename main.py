@@ -1,11 +1,26 @@
-# This is main.py
 import os
 import discord
-import motor.motor_asyncio  # Use the async library 'motor'
+import motor.motor_asyncio
 import asyncio
+import threading  # <-- Add this
+from flask import Flask  # <-- Add this
 from discord.ext import commands
 
-# --- Bot Setup ---
+# --- Flask Web App Setup ---
+# This part keeps Koyeb's free tier alive
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    # This is the webpage Koyeb will check
+    return "I am alive and running!"
+
+def run_flask_app():
+    # Runs the web app on Koyeb's port
+    port = int(os.environ.get('PORT', 8000))
+    app.run(host='0.0.0.0', port=port)
+
+# --- Discord Bot Setup ---
 intents = discord.Intents.default()
 intents.guilds = True
 intents.messages = True
@@ -14,7 +29,6 @@ intents.message_content = True
 class ConfessionBot(commands.Bot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # --- Connect using 'motor' ---
         try:
             self.mongo_client = motor.motor_asyncio.AsyncIOMotorClient(os.environ['MONGO_URI'])
             self.db = self.mongo_client["confession_bot_db"]
@@ -35,26 +49,29 @@ class ConfessionBot(commands.Bot):
         
     async def on_ready(self):
         print(f'Logged in as {self.user} (ID: {self.user.id})')
-        
         try:
-            # Sync slash commands
             synced = await self.tree.sync() 
             print(f"Synced {len(synced)} slash commands.")
         except Exception as e:
             print(f"Failed to sync commands: {e}")
-            
         print('-----------------------------------------')
 
-# Create the bot instance
 bot = ConfessionBot(
     command_prefix=commands.when_mentioned_or("!"),
     intents=intents,
     help_command=None
 )
 
-async def main():
+async def run_bot_async():
     async with bot:
         await bot.start(os.environ['DISCORD_TOKEN'])
 
+# --- Main Entry Point ---
 if __name__ == "__main__":
-    asyncio.run(main())
+    # 1. Start the Flask web app in a separate thread
+    flask_thread = threading.Thread(target=run_flask_app)
+    flask_thread.start()
+    
+    # 2. Run the Discord bot in the main thread
+    print("Starting bot...")
+    asyncio.run(run_bot_async())
